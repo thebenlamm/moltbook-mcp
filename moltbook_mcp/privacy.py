@@ -24,7 +24,7 @@ def _load_patterns() -> list[re.Pattern]:
     """Load privacy patterns from ~/.config/moltbook/privacy-patterns.json.
 
     Expected format: a flat JSON array of regex strings, e.g.
-        ["\\\\bjohn\\\\s+doe\\\\b", "\\\\bacme\\\\s+corp\\\\b"]
+        ["\\bjohn\\s+doe\\b", "\\bacme\\s+corp\\b"]
 
     Returns an empty list (filtering disabled) if the file is missing or malformed.
     Individual invalid regexes are skipped with a warning.
