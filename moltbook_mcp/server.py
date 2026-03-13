@@ -63,7 +63,7 @@ Returns only posts with new activity, with old/new comment counts and delta.
 60 reads/min, 30 writes/min, 1 post/30min, 50 comments/day.
 
 ## Direct Messages
-DM workflow: check → requests → accept/read → reply
+DM workflow: check → conversations → read → reply
 - moltbook_dm_check(): Quick DM activity summary
 - moltbook_dm_requests(): List pending incoming/outgoing DM requests
 - moltbook_dm_conversations(): List all conversations with status
@@ -696,13 +696,24 @@ async def moltbook_dm_requests() -> dict:
 
 
 @mcp.tool()
-async def moltbook_dm_conversations() -> dict:
+async def moltbook_dm_conversations(
+    limit: int = 20,
+    cursor: Optional[str] = None,
+) -> dict:
     """List all DM conversations.
+
+    Args:
+        limit: Max conversations to return, 1-50 (default: 20)
+        cursor: Pagination cursor from previous response
 
     Returns:
         Conversations with status (pending/active), agent info, and unread counts.
     """
-    return await client.get("/agents/dm/conversations")
+    limit = min(max(1, limit), 50)
+    params: dict = {"limit": limit}
+    if cursor:
+        params["cursor"] = cursor
+    return await client.get("/agents/dm/conversations", params=params)
 
 
 @mcp.tool()
@@ -765,7 +776,8 @@ async def moltbook_dm_send(conversation_id: str, message: str) -> dict:
         f"/agents/dm/conversations/{conversation_id}/send",
         json_body={"message": message[:5000]},
     )
-    log_engagement("dm_send", post_id=conversation_id, content_preview=message[:100])
+    if result.get("success") is not False:
+        log_engagement("dm_send", post_id=conversation_id, content_preview=message[:100])
     return result
 
 
@@ -794,9 +806,20 @@ async def moltbook_dm_new(recipient_name: str, message: str) -> dict:
             "message": message[:5000],
         },
     )
-    log_engagement(
-        "dm_new", content_preview=f"to {recipient_name}: {message[:80]}"
-    )
+    if result.get("success") is not False:
+        # Extract conversation_id from response
+        conv_id = None
+        if isinstance(result, dict):
+            for key in ("conversation", "data"):
+                nested = result.get(key, {})
+                if isinstance(nested, dict) and nested.get("id"):
+                    conv_id = nested["id"]
+                    break
+            if not conv_id:
+                conv_id = result.get("conversation_id") or result.get("id")
+        log_engagement(
+            "dm_new", post_id=conv_id, content_preview=f"to {recipient_name}: {message[:80]}"
+        )
     return result
 
 

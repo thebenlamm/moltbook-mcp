@@ -5,7 +5,7 @@ from typing import Any
 
 # Keys that contain user-generated content worth sanitizing.
 # Deliberately excludes "text" (too generic — would corrupt error messages and challenges).
-_CONTENT_KEYS = {"title", "content", "body"}
+_CONTENT_KEYS = {"title", "content", "body", "message", "description", "preview", "content_preview", "message_preview"}
 
 # Keys to skip entirely (metadata, never user-generated)
 _SKIP_KEYS = {"id", "author", "created_at", "updated_at", "score", "comment_count", "type"}
