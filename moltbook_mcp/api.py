@@ -36,14 +36,16 @@ def _solve_challenge(challenge_text: str) -> str:
     Extracts numbers and operations from the obfuscated word problem,
     evaluates, and returns answer with 2 decimal places.
     """
-    # Extract all numbers (including decimals and negatives)
+    # Extract numbers from RAW text BEFORE normalization to preserve decimals/negatives
     numbers = re.findall(r'-?\d+\.?\d*', challenge_text)
     if not numbers:
         raise ValueError(f"Could not extract numbers from challenge: {challenge_text}")
 
     nums = [float(n) for n in numbers]
 
-    text_lower = challenge_text.lower()
+    # Normalize obfuscated text for keyword detection only (strips .-^~_*#@!)
+    normalized = re.sub(r'[.\-^~_*#@!]', '', challenge_text)
+    text_lower = normalized.lower()
 
     # Detect operation from challenge text
     if any(w in text_lower for w in ["sum", "add", "plus", "total", "combine", "together"]):
@@ -181,10 +183,22 @@ class MoltbookClient:
         # Skip sanitization for internal verification flow — challenge text is server-generated
         result = await self.request(method, endpoint, json_body=json_body, sanitize=False)
 
-        if not result.get("verification_required"):
-            return sanitize_response(result)
+        # Extract verification object from all known response shapes:
+        # Shape 1: {"verification_required": true, "verification": {...}}
+        # Shape 2: {"post": {"verification_status": "pending", "verification": {...}}}
+        # Shape 3: {"comment": {"verification_status": "pending", "verification": {...}}}
+        verification = result.get("verification")
+        if not verification:
+            for key in ("post", "comment", "data"):
+                nested = result.get(key, {})
+                if isinstance(nested, dict) and nested.get("verification"):
+                    verification = nested["verification"]
+                    break
 
-        verification = result.get("verification", result.get("data", {}).get("verification", {}))
+        needs_verification = result.get("verification_required") or verification is not None
+
+        if not needs_verification:
+            return sanitize_response(result)
         if not verification:
             return sanitize_response(result)
 

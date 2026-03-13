@@ -61,6 +61,11 @@ Returns only posts with new activity, with old/new comment counts and delta.
 
 ## Rate Limits
 60 reads/min, 30 writes/min, 1 post/30min, 50 comments/day.
+
+## Additional Tools
+- moltbook_mark_notifications_read(): Clear notification badge
+- moltbook_verify(code, answer): Manual verification fallback
+- moltbook_get_submolts(): Discover available communities
 """,
 )
 
@@ -73,7 +78,7 @@ client = MoltbookClient()
 @mcp.tool()
 async def moltbook_get_feed(
     sort: str = "hot",
-    limit: int = 25,
+    limit: int = 10,
     filter: str = "all",
     submolt: Optional[str] = None,
     cursor: Optional[str] = None,
@@ -82,7 +87,7 @@ async def moltbook_get_feed(
 
     Args:
         sort: Sort order — "hot", "new", "top", or "rising" (default: hot)
-        limit: Max posts to return, 1-100 (default: 25)
+        limit: Max posts to return, 1-100 (default: 10)
         filter: "all" for global feed, "following" for personalized (default: all)
         submolt: Filter to a specific submolt (e.g. "general", "ponderings")
         cursor: Pagination cursor from previous response
@@ -111,6 +116,11 @@ async def moltbook_get_feed(
         for post in posts:
             if not isinstance(post, dict):
                 continue
+            # Truncate content to preview in feed to reduce response size
+            content = post.get("content")
+            if isinstance(content, str) and len(content) > 300:
+                post["content"] = content[:300] + "..."
+                post["_content_truncated"] = True
             pid = post.get("id")
             if not pid:
                 continue
@@ -232,12 +242,19 @@ async def moltbook_create_post(
 
     result = await client.request_with_verification("POST", "/posts", body)
 
-    # Log engagement
+    # Log engagement — extract post_id from multiple response shapes
     post_id = None
     if isinstance(result, dict):
-        data = result.get("data", result)
-        if isinstance(data, dict):
-            post_id = data.get("id") or data.get("post_id")
+        # Shape 1: {"post": {"id": "..."}} (actual API response)
+        # Shape 2: {"data": {"id": "..."}}
+        # Shape 3: {"id": "..."} (flat)
+        for key in ("post", "data"):
+            nested = result.get(key, {})
+            if isinstance(nested, dict) and nested.get("id"):
+                post_id = nested["id"]
+                break
+        if not post_id:
+            post_id = result.get("id") or result.get("post_id")
     log_engagement("post", post_id=post_id, submolt=submolt, content_preview=title)
 
     if post_id:
@@ -321,12 +338,19 @@ async def moltbook_create_comment(
         "POST", f"/posts/{post_id}/comments", body
     )
 
-    # Log engagement
+    # Log engagement — extract comment_id from multiple response shapes
     comment_id = None
     if isinstance(result, dict):
-        data = result.get("data", result)
-        if isinstance(data, dict):
-            comment_id = data.get("id") or data.get("comment_id")
+        # Shape 1: {"comment": {"id": "..."}} (actual API response)
+        # Shape 2: {"data": {"id": "..."}}
+        # Shape 3: {"id": "..."} (flat)
+        for key in ("comment", "data"):
+            nested = result.get(key, {})
+            if isinstance(nested, dict) and nested.get("id"):
+                comment_id = nested["id"]
+                break
+        if not comment_id:
+            comment_id = result.get("id") or result.get("comment_id")
     log_engagement(
         "comment",
         post_id=comment_id or post_id,
@@ -466,13 +490,34 @@ async def moltbook_unfollow(name: str) -> dict:
 
 
 @mcp.tool()
-async def moltbook_get_notifications() -> dict:
+async def moltbook_get_notifications(
+    limit: int = 15,
+    cursor: Optional[str] = None,
+) -> dict:
     """Get recent notifications.
+
+    Args:
+        limit: Max notifications to return, 1-50 (default: 15)
+        cursor: Pagination cursor from previous response
 
     Returns:
         List of notifications (replies, upvotes, follows, mentions).
     """
-    return await client.get("/notifications")
+    limit = min(max(1, limit), 50)
+    params: dict = {"limit": limit}
+    if cursor:
+        params["cursor"] = cursor
+    return await client.get("/notifications", params=params)
+
+
+@mcp.tool()
+async def moltbook_mark_notifications_read() -> dict:
+    """Mark all notifications as read.
+
+    Returns:
+        Success confirmation.
+    """
+    return await client.post("/notifications/read-all")
 
 
 # ── State & Diffing ──────────────────────────────────────────────────
@@ -560,6 +605,58 @@ async def moltbook_state(fmt: str = "compact") -> str:
         Summary of tracked engagement (seen, voted, commented, own posts).
     """
     return state.digest(fmt)
+
+
+# ── Verification ────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def moltbook_verify(verification_code: str, answer: str) -> dict:
+    """Manually submit a verification challenge answer.
+
+    Use this as a fallback when auto-verification fails or to retry
+    a failed verification.
+
+    Args:
+        verification_code: The verification_code from the challenge response
+        answer: Your answer to the math challenge
+
+    Returns:
+        Verification result with the created post/comment data.
+    """
+    result = await client.post(
+        "/verify",
+        json_body={
+            "verification_code": verification_code,
+            "answer": answer,
+        },
+    )
+
+    # Update engagement state from verified result
+    if isinstance(result, dict):
+        for key, mark_fn in [("post", state.mark_my_post), ("comment", None)]:
+            nested = result.get(key, {})
+            if isinstance(nested, dict) and nested.get("id"):
+                item_id = nested["id"]
+                log_engagement(f"verify_{key}", post_id=item_id)
+                if mark_fn:
+                    mark_fn(item_id)
+                break
+
+    return result
+
+
+# ── Discovery ──────────────────────────────────────────────────
+
+
+@mcp.tool()
+async def moltbook_get_submolts() -> dict:
+    """List available submolts (communities).
+
+    Returns:
+        List of submolts with names, descriptions, and member counts.
+    """
+    return await client.get("/submolts")
 
 
 # ── Entry Point ──────────────────────────────────────────────────────
