@@ -30,44 +30,154 @@ def _load_api_key() -> str:
     )
 
 
+_WORD_TO_NUM = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+    "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+    "seventy": 70, "eighty": 80, "ninety": 90, "hundred": 100,
+}
+
+# Build a collapsed-key version for matching after dedup
+# e.g. "three" -> "thre", "fifteen" -> "fiften", "eighteen" -> "eighten"
+_COLLAPSED = {re.sub(r'(.)\1+', r'\1', k): v for k, v in _WORD_TO_NUM.items()}
+
+
+def _collapse_repeats(text: str) -> str:
+    """Collapse repeated chars case-insensitively: 'eEe' -> 'e', 'OoO' -> 'o'."""
+    return re.sub(r'(?i)(.)\1+', r'\1', text)
+
+
+def _normalize_challenge(text: str) -> str:
+    """Strip ALL non-alphanumeric/space characters and collapse repeated letters.
+
+    Handles obfuscation like 'ThIrTy{tW}o' -> 'thirty two'
+    and 'eEeIghT eEn' -> 'eight en', 'NeWwToOnSs' -> 'newtons'.
+    """
+    # Strip everything that isn't a letter, digit, or space
+    cleaned = re.sub(r'[^a-zA-Z0-9\s]', '', text)
+    # Collapse repeated letters: 'eee' -> 'e', 'OoO' -> 'o'
+    cleaned = _collapse_repeats(cleaned)
+    return cleaned.lower()
+
+
+def _match_word(word: str) -> int | None:
+    """Match a word against the number dictionary, trying exact then collapsed."""
+    if word in _WORD_TO_NUM:
+        return _WORD_TO_NUM[word]
+    if word in _COLLAPSED:
+        return _COLLAPSED[word]
+    return None
+
+
+def _extract_word_numbers(text: str) -> list[float]:
+    """Extract numbers from text, supporting both digits and spelled-out words.
+
+    Handles: 'thirty two' -> 32, 'forty five' -> 45, 'eighteen' -> 18,
+    'eight en' -> 18 (split by obfuscation), '32' -> 32.
+    """
+    # First try digit extraction
+    digit_nums = re.findall(r'-?\d+\.?\d*', text)
+
+    # Try word-based extraction with lookahead for split words
+    words = text.split()
+    word_nums = []
+    i = 0
+    while i < len(words):
+        # Try joining current + next word(s) to catch split numbers like "eight en" = "eighteen"
+        matched = False
+        for join_len in (3, 2):  # try joining 3, then 2 words
+            if i + join_len <= len(words):
+                joined = ''.join(words[i:i + join_len])
+                val = _match_word(joined)
+                if val is not None:
+                    word_nums.append(float(val))
+                    i += join_len
+                    matched = True
+                    break
+        if matched:
+            continue
+
+        val = _match_word(words[i])
+        if val is not None:
+            # Check for compound: "thirty two" = 30 + 2, "forty five" = 40 + 5
+            if val >= 20 and val < 100 and i + 1 < len(words):
+                next_val = _match_word(words[i + 1])
+                if next_val is not None and next_val < 10:
+                    val += next_val
+                    i += 1
+                else:
+                    # Try joining next two words: "tw o" -> "two"
+                    if i + 2 <= len(words):
+                        joined_next = ''.join(words[i + 1:i + 3]) if i + 2 < len(words) else words[i + 1]
+                        next_val = _match_word(joined_next)
+                        if next_val is not None and next_val < 10:
+                            val += next_val
+                            i += (2 if i + 2 < len(words) else 1)
+            # Check for "hundred" multiplier
+            if i + 1 < len(words) and _match_word(words[i + 1]) == 100:
+                val *= 100
+                i += 1
+                if i + 1 < len(words):
+                    next_val = _match_word(words[i + 1])
+                    if next_val is not None and next_val < 100:
+                        val += next_val
+                        i += 1
+            word_nums.append(float(val))
+        i += 1
+
+    # Prefer word numbers if found (challenges use spelled-out numbers)
+    # Fall back to digit numbers
+    if word_nums:
+        return word_nums
+    if digit_nums:
+        return [float(n) for n in digit_nums]
+    return []
+
+
 def _solve_challenge(challenge_text: str) -> str:
     """Solve a Moltbook verification math challenge.
 
     Extracts numbers and operations from the obfuscated word problem,
     evaluates, and returns answer with 2 decimal places.
     """
-    # Extract numbers from RAW text BEFORE normalization to preserve decimals/negatives
-    numbers = re.findall(r'-?\d+\.?\d*', challenge_text)
-    if not numbers:
-        raise ValueError(f"Could not extract numbers from challenge: {challenge_text}")
+    # Normalize: strip all obfuscation, collapse repeated chars
+    text_lower = _normalize_challenge(challenge_text)
 
-    nums = [float(n) for n in numbers]
+    # Extract numbers (word-based first, digit fallback)
+    nums = _extract_word_numbers(text_lower)
+    if not nums:
+        # Also try digit extraction from raw text as last resort
+        raw_nums = re.findall(r'-?\d+\.?\d*', challenge_text)
+        if not raw_nums:
+            raise ValueError(
+                f"Could not extract numbers from challenge: {challenge_text}"
+            )
+        nums = [float(n) for n in raw_nums]
 
-    # Normalize obfuscated text for keyword detection only (strips .-^~_*#@!)
-    normalized = re.sub(r'[.\-^~_*#@!]', '', challenge_text)
-    text_lower = normalized.lower()
-
-    # Detect operation from challenge text
-    if any(w in text_lower for w in ["sum", "add", "plus", "total", "combine", "together"]):
-        result = sum(nums)
-    elif any(w in text_lower for w in ["subtract", "minus", "difference", "take away", "less"]):
-        result = nums[0] - sum(nums[1:]) if len(nums) > 1 else nums[0]
-    elif any(w in text_lower for w in ["multiply", "product", "times"]):
+    # Detect operation from normalized text
+    # Check multiply/divide BEFORE add/total — "what's total force?" appears in
+    # multiplication challenges, and "total" would wrongly trigger addition.
+    if any(w in text_lower for w in ["multiply", "multipli", "product", "times"]):
         result = 1
         for n in nums:
             result *= n
-    elif any(w in text_lower for w in ["divide", "quotient", "split", "ratio"]):
+    elif any(w in text_lower for w in ["divide", "quotient", "split", "ratio", "presure"]):
         result = nums[0]
         for n in nums[1:]:
             if n != 0:
                 result /= n
+    elif any(w in text_lower for w in ["subtract", "minus", "difference", "take away", "less"]):
+        result = nums[0] - sum(nums[1:]) if len(nums) > 1 else nums[0]
+    elif any(w in text_lower for w in ["sum", "add", "plus", "total", "combine", "together", "gains"]):
+        result = sum(nums)
     elif any(w in text_lower for w in ["square root", "sqrt"]):
         result = nums[0] ** 0.5
     elif any(w in text_lower for w in ["power", "exponent", "raised"]):
         result = nums[0] ** nums[1] if len(nums) > 1 else nums[0]
     else:
-        # Default: try to evaluate as expression
-        # Extract a math-like expression
+        # Default: try to evaluate as expression, fall back to sum
         expr_match = re.search(r'[\d\.\s\+\-\*\/\(\)]+', challenge_text)
         if expr_match:
             try:
