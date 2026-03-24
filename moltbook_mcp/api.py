@@ -45,8 +45,11 @@ _COLLAPSED = {re.sub(r'(.)\1+', r'\1', k): v for k, v in _WORD_TO_NUM.items()}
 
 
 def _collapse_repeats(text: str) -> str:
-    """Collapse repeated chars case-insensitively: 'eEe' -> 'e', 'OoO' -> 'o'."""
-    return re.sub(r'(?i)(.)\1+', r'\1', text)
+    """Collapse repeated LETTERS case-insensitively: 'eEe' -> 'e', 'OoO' -> 'o'.
+
+    Digits are preserved: '22' stays '22', '100' stays '100'.
+    """
+    return re.sub(r'(?i)([a-zA-Z])\1+', r'\1', text)
 
 
 def _normalize_challenge(text: str) -> str:
@@ -63,11 +66,31 @@ def _normalize_challenge(text: str) -> str:
 
 
 def _match_word(word: str) -> int | None:
-    """Match a word against the number dictionary, trying exact then collapsed."""
+    """Match a word against the number dictionary, trying exact then collapsed.
+
+    Also handles joined compounds like 'thirtytwo' -> 32 by trying prefix splits.
+    """
     if word in _WORD_TO_NUM:
         return _WORD_TO_NUM[word]
     if word in _COLLAPSED:
         return _COLLAPSED[word]
+
+    # Try compound decomposition: split 'thirtytwo' into 'thirty' + 'two'
+    # Only for words long enough to be compounds (len >= 5)
+    if len(word) >= 5:
+        all_keys = list(_WORD_TO_NUM.keys()) + list(_COLLAPSED.keys())
+        for prefix in all_keys:
+            if word.startswith(prefix) and len(prefix) < len(word):
+                suffix = word[len(prefix):]
+                suffix_val = _WORD_TO_NUM.get(suffix) or _COLLAPSED.get(suffix)
+                prefix_val = _WORD_TO_NUM.get(prefix) or _COLLAPSED.get(prefix)
+                if suffix_val is not None and prefix_val is not None:
+                    # Tens + ones: "thirtytwo" = 30 + 2
+                    if 20 <= prefix_val < 100 and suffix_val < 10:
+                        return prefix_val + suffix_val
+                    # Ones + hundred: "twohundred" = 200
+                    if prefix_val < 10 and suffix_val == 100:
+                        return prefix_val * suffix_val
     return None
 
 
@@ -157,9 +180,18 @@ def _solve_challenge(challenge_text: str) -> str:
         nums = [float(n) for n in raw_nums]
 
     # Detect operation from normalized text
+    # Physics patterns first — these override generic keyword matching.
+    # Work = Force × Distance (Newtons over/across meters)
+    # Use 'in' substring matching to handle collapsed obfuscation variants
+    # (e.g., "across" -> "acros", "newtons" -> "newton").
+    _has_force_unit = any(u in text_lower for u in ["newton", "joule"])
+    _has_distance_unit = "meter" in text_lower
+    _has_work_keyword = any(w in text_lower for w in ["over", "acro", "through", "along", "work done"])
+    _is_physics_multiply = _has_force_unit and _has_distance_unit and _has_work_keyword
+
     # Check multiply/divide BEFORE add/total — "what's total force?" appears in
     # multiplication challenges, and "total" would wrongly trigger addition.
-    if any(w in text_lower for w in ["multiply", "multipli", "product", "times"]):
+    if _is_physics_multiply or any(w in text_lower for w in ["multiply", "multipli", "product", "times"]):
         result = 1
         for n in nums:
             result *= n
